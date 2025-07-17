@@ -195,6 +195,16 @@ func getLastValue(lineAllData map[string][]any, key string) any {
 	return nil
 }
 
+func getValueOrArray(lineAllData map[string][]any, key string) any {
+	if values, exists := lineAllData[key]; exists && len(values) > 0 {
+		if len(values) == 1 {
+			return values[0]
+		}
+		return values
+	}
+	return nil
+}
+
 func (p *Processor) prettifyIfMatchKnownFormats(line string, lineAllData map[string][]any) (string, error) {
 	if getLastValue(lineAllData, "level") != nil && getLastValue(lineAllData, "ts") != nil && getLastValue(lineAllData, "msg") != nil {
 		return p.prettifyZapLine(line, lineAllData)
@@ -236,7 +246,7 @@ func (p *Processor) prettifyZapLine(line string, lineAllData map[string][]any) (
 	filteredData := make(map[string]any)
 	for key := range lineAllData {
 		if key != "level" && key != "ts" && key != "caller" && key != "logger" && key != "msg" && key != "stacktrace" {
-			filteredData[key] = getLastValue(lineAllData, key)
+			filteredData[key] = getValueOrArray(lineAllData, key)
 		}
 	}
 
@@ -311,7 +321,7 @@ func (p *Processor) prettifyZapdriveLine(line string, lineAllData map[string][]a
 	for key := range lineAllData {
 		if key != timeField && key != "severity" && key != "caller" && key != "logger" && key != "message" && key != "errorVerbose" && key != "stacktrace" {
 			if p.showAllFields || (key != "labels" && key != "serviceContext" && key != "logging.googleapis.com/labels" && key != "logging.googleapis.com/sourceLocation") {
-				filteredData[key] = getLastValue(lineAllData, key)
+				filteredData[key] = getValueOrArray(lineAllData, key)
 			}
 		}
 	}
@@ -368,7 +378,7 @@ func (p *Processor) prettifyLevelMessageTimeLine(line string, lineAllData map[st
 	filteredData := make(map[string]any)
 	for key := range lineAllData {
 		if key != "level" && key != "time" && key != "message" && key != "module" && key != "stacktrace" {
-			filteredData[key] = getLastValue(lineAllData, key)
+			filteredData[key] = getValueOrArray(lineAllData, key)
 		}
 	}
 
