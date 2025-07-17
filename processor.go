@@ -147,7 +147,8 @@ func (p *Processor) processLine(line string) {
 		return
 	}
 
-	lineData := map[string]interface{}{}
+	lineData := map[string]any{}
+	lineAllData := map[string][]any{}
 	for decoder.More() {
 		token, err := decoder.Token()
 		if err != nil {
@@ -169,15 +170,16 @@ func (p *Processor) processLine(line string) {
 		}
 
 		lineData[key] = value
+		lineAllData[key] = append(lineAllData[key], value)
 	}
 
 	// Read the ending delimiter of the JSON object
 	if _, err := decoder.Token(); err != nil {
-		p.unformattedPrintLine(line, "Invalid JSON, misssing object end delimiter in line, ending processing (%s)", err)
+		p.unformattedPrintLine(line, "Invalid JSON, missing object end delimiter in line, ending processing (%s)", err)
 		return
 	}
 
-	prettyLine, err := p.maybePrettyPrintLine(line, lineData)
+	prettyLine, err := p.prettifyIfMatchKnownFormats(line, lineData, lineAllData)
 
 	if err != nil {
 		fmt.Fprint(p.output, line)
@@ -193,19 +195,23 @@ func (p *Processor) processLine(line string) {
 	}
 }
 
-func (p *Processor) maybePrettyPrintLine(line string, lineData map[string]interface{}) (string, error) {
+func (p *Processor) prettifyIfMatchKnownFormats(line string, lineData map[string]any, lineAllData map[string][]any) (string, error) {
 	if lineData["level"] != nil && lineData["ts"] != nil && lineData["msg"] != nil {
-		return p.maybePrettyPrintZapLine(line, lineData)
+		return p.prettifyZapLine(line, lineData)
 	}
 
 	if lineData["severity"] != nil && (lineData["time"] != nil || lineData["timestamp"] != nil) && lineData["message"] != nil {
-		return p.maybePrettyPrintZapdriverLine(line, lineData)
+		return p.prettifyZapdriveLine(line, lineData)
+	}
+
+	if lineData["level"] != nil && lineData["message"] != nil && lineData["time"] != nil {
+		return p.prettifyLevelMessageTimeLine(line, lineData, lineAllData)
 	}
 
 	return "", errNonZapLine
 }
 
-func (p *Processor) maybePrettyPrintZapLine(line string, lineData map[string]interface{}) (string, error) {
+func (p *Processor) prettifyZapLine(line string, lineData map[string]any) (string, error) {
 	logTimestamp, err := tsFieldToTimestamp(lineData["ts"])
 	if err != nil {
 		return "", fmt.Errorf("unable to process field 'ts': %w", err)
@@ -269,7 +275,7 @@ func tsFieldToTimestamp(input interface{}) (*time.Time, error) {
 	return &zeroTime, fmt.Errorf("don't know how to turn %T (value %s) into a time.Time object", input, input)
 }
 
-func (p *Processor) maybePrettyPrintZapdriverLine(line string, lineData map[string]interface{}) (string, error) {
+func (p *Processor) prettifyZapdriveLine(line string, lineData map[string]interface{}) (string, error) {
 	timeField := "time"
 	timeValue := lineData[timeField]
 	if lineData[timeField] == nil {
@@ -328,6 +334,52 @@ func (p *Processor) maybePrettyPrintZapdriverLine(line string, lineData map[stri
 
 	if errorVerbose != "" || stacktrace != "" {
 		p.writeErrorDetails(&buffer, errorVerbose, stacktrace)
+	}
+
+	return buffer.String(), nil
+}
+
+func (p *Processor) prettifyLevelMessageTimeLine(line string, lineData map[string]any, lineAllData map[string][]any) (string, error) {
+	logTimestamp, err := tsFieldToTimestamp(lineData["time"])
+	if err != nil {
+		return "", fmt.Errorf("unable to process field 'time': %w", err)
+	}
+
+	var buffer bytes.Buffer
+
+	var logger *string
+	// Handle multiple module keys by merging them with dot separator
+	if moduleValues, exists := lineAllData["module"]; exists && len(moduleValues) > 0 {
+		var modules []string
+		for _, module := range moduleValues {
+			if moduleStr, ok := module.(string); ok {
+				modules = append(modules, moduleStr)
+			}
+		}
+		if len(modules) > 0 {
+			mergedModules := strings.Join(modules, ".")
+			logger = &mergedModules
+		}
+	}
+
+	p.writeHeader(&buffer, logTimestamp, lineData["level"].(string), nil, logger, lineData["message"].(string))
+
+	// Delete standard stuff from data fields
+	delete(lineData, "level")
+	delete(lineData, "time")
+	delete(lineData, "message")
+	delete(lineData, "module")
+
+	stacktrace := ""
+	if t, ok := lineData["stacktrace"].(string); ok && t != "" {
+		delete(lineData, "stacktrace")
+		stacktrace = t
+	}
+
+	p.writeJSON(&buffer, lineData)
+
+	if stacktrace != "" {
+		p.writeErrorDetails(&buffer, "", stacktrace)
 	}
 
 	return buffer.String(), nil

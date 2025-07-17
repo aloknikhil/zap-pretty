@@ -249,6 +249,59 @@ func TestZapDriverNewProduction(t *testing.T) {
 	})
 }
 
+func TestLevelMessageTimeLine(t *testing.T) {
+	runLogTests(t, []logTest{
+		{
+			name: "single_log_line",
+			lines: []string{
+				`{"level":"info","module":"server","module":"txindex","height":24855179,"time":"2025-07-17T14:18:17Z","message":"indexed block events"}`,
+			},
+			expectedLines: []string{
+				"[2025-07-17 10:18:17.000 EDT] \x1b[32mINFO\x1b[0m \x1b[38;5;244m(server.txindex)\x1b[0m \x1b[34mindexed block events\x1b[0m {\"height\":24855179}",
+			},
+		},
+		{
+			name: "single_module",
+			lines: []string{
+				`{"level":"debug","module":"server","height":24855179,"time":"2025-07-17T14:18:17Z","message":"processing block"}`,
+			},
+			expectedLines: []string{
+				"[2025-07-17 10:18:17.000 EDT] \x1b[34mDEBUG\x1b[0m \x1b[38;5;244m(server)\x1b[0m \x1b[34mprocessing block\x1b[0m {\"height\":24855179}",
+			},
+		},
+		{
+			name: "no_module",
+			lines: []string{
+				`{"level":"error","height":24855179,"time":"2025-07-17T14:18:17Z","message":"block processing failed"}`,
+			},
+			expectedLines: []string{
+				"[2025-07-17 10:18:17.000 EDT] \x1b[31mERROR\x1b[0m \x1b[34mblock processing failed\x1b[0m {\"height\":24855179}",
+			},
+		},
+		{
+			name: "with_stacktrace",
+			lines: []string{
+				`{"level":"error","module":"server","height":24855179,"time":"2025-07-17T14:18:17Z","message":"block processing failed","stacktrace":"main.go:42\n\tprocess()"}`,
+			},
+			expectedLines: []string{
+				"[2025-07-17 10:18:17.000 EDT] \x1b[31mERROR\x1b[0m \x1b[38;5;244m(server)\x1b[0m \x1b[34mblock processing failed\x1b[0m {\"height\":24855179}",
+				"Stacktrace",
+				"    main.go:42",
+				"    \tprocess()",
+			},
+		},
+		{
+			name: "multiple_modules_three",
+			lines: []string{
+				`{"level":"info","module":"server","module":"txindex","module":"database","height":24855179,"time":"2025-07-17T14:18:17Z","message":"indexed block events"}`,
+			},
+			expectedLines: []string{
+				"[2025-07-17 10:18:17.000 EDT] \x1b[32mINFO\x1b[0m \x1b[38;5;244m(server.txindex.database)\x1b[0m \x1b[34mindexed block events\x1b[0m {\"height\":24855179}",
+			},
+		},
+	})
+}
+
 func runLogTests(t *testing.T, tests []logTest) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
