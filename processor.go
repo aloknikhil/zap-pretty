@@ -147,7 +147,6 @@ func (p *Processor) processLine(line string) {
 		return
 	}
 
-	lineData := map[string]any{}
 	lineAllData := map[string][]any{}
 	for decoder.More() {
 		token, err := decoder.Token()
@@ -158,18 +157,12 @@ func (p *Processor) processLine(line string) {
 
 		key := token.(string)
 
-		// if keys[key] {
-		// 	// Key duplicated here ...
-		// }
-		// keys[key] = true
-
-		var value interface{}
+		var value any
 		if err := decoder.Decode(&value); err != nil {
 			p.unformattedPrintLine(line, "Invalid JSON value in line, ending processing (%s)", err)
 			return
 		}
 
-		lineData[key] = value
 		lineAllData[key] = append(lineAllData[key], value)
 	}
 
@@ -179,7 +172,7 @@ func (p *Processor) processLine(line string) {
 		return
 	}
 
-	prettyLine, err := p.prettifyIfMatchKnownFormats(line, lineData, lineAllData)
+	prettyLine, err := p.prettifyIfMatchKnownFormats(line, lineAllData)
 
 	if err != nil {
 		fmt.Fprint(p.output, line)
@@ -195,57 +188,66 @@ func (p *Processor) processLine(line string) {
 	}
 }
 
-func (p *Processor) prettifyIfMatchKnownFormats(line string, lineData map[string]any, lineAllData map[string][]any) (string, error) {
-	if lineData["level"] != nil && lineData["ts"] != nil && lineData["msg"] != nil {
-		return p.prettifyZapLine(line, lineData)
+func getLastValue(lineAllData map[string][]any, key string) any {
+	if values, exists := lineAllData[key]; exists && len(values) > 0 {
+		return values[len(values)-1]
+	}
+	return nil
+}
+
+func (p *Processor) prettifyIfMatchKnownFormats(line string, lineAllData map[string][]any) (string, error) {
+	if getLastValue(lineAllData, "level") != nil && getLastValue(lineAllData, "ts") != nil && getLastValue(lineAllData, "msg") != nil {
+		return p.prettifyZapLine(line, lineAllData)
 	}
 
-	if lineData["severity"] != nil && (lineData["time"] != nil || lineData["timestamp"] != nil) && lineData["message"] != nil {
-		return p.prettifyZapdriveLine(line, lineData)
+	if getLastValue(lineAllData, "severity") != nil && (getLastValue(lineAllData, "time") != nil || getLastValue(lineAllData, "timestamp") != nil) && getLastValue(lineAllData, "message") != nil {
+		return p.prettifyZapdriveLine(line, lineAllData)
 	}
 
-	if lineData["level"] != nil && lineData["message"] != nil && lineData["time"] != nil {
-		return p.prettifyLevelMessageTimeLine(line, lineData, lineAllData)
+	if getLastValue(lineAllData, "level") != nil && getLastValue(lineAllData, "message") != nil && getLastValue(lineAllData, "time") != nil {
+		return p.prettifyLevelMessageTimeLine(line, lineAllData)
 	}
 
 	return "", errNonZapLine
 }
 
-func (p *Processor) prettifyZapLine(line string, lineData map[string]any) (string, error) {
-	logTimestamp, err := tsFieldToTimestamp(lineData["ts"])
+func (p *Processor) prettifyZapLine(line string, lineAllData map[string][]any) (string, error) {
+	logTimestamp, err := tsFieldToTimestamp(getLastValue(lineAllData, "ts"))
 	if err != nil {
 		return "", fmt.Errorf("unable to process field 'ts': %w", err)
 	}
 
 	var caller *string
-	if v := lineData["caller"]; v != nil {
+	if v := getLastValue(lineAllData, "caller"); v != nil {
 		callerStr := v.(string)
 		caller = &callerStr
 	}
 
 	var logger *string
-	if v := lineData["logger"]; v != nil {
+	if v := getLastValue(lineAllData, "logger"); v != nil {
 		loggerStr := v.(string)
 		logger = &loggerStr
 	}
 
 	var buffer bytes.Buffer
-	p.writeHeader(&buffer, logTimestamp, lineData["level"].(string), caller, logger, lineData["msg"].(string))
+	p.writeHeader(&buffer, logTimestamp, getLastValue(lineAllData, "level").(string), caller, logger, getLastValue(lineAllData, "msg").(string))
 
-	// Delete standard stuff from data fields
-	delete(lineData, "level")
-	delete(lineData, "ts")
-	delete(lineData, "caller")
-	delete(lineData, "logger")
-	delete(lineData, "msg")
-
-	stacktrace := ""
-	if t, ok := lineData["stacktrace"].(string); ok && t != "" {
-		delete(lineData, "stacktrace")
-		stacktrace = t
+	// Create filtered data map excluding standard fields
+	filteredData := make(map[string]any)
+	for key := range lineAllData {
+		if key != "level" && key != "ts" && key != "caller" && key != "logger" && key != "msg" && key != "stacktrace" {
+			filteredData[key] = getLastValue(lineAllData, key)
+		}
 	}
 
-	p.writeJSON(&buffer, lineData)
+	stacktrace := ""
+	if t := getLastValue(lineAllData, "stacktrace"); t != nil {
+		if stacktraceStr, ok := t.(string); ok && stacktraceStr != "" {
+			stacktrace = stacktraceStr
+		}
+	}
+
+	p.writeJSON(&buffer, filteredData)
 
 	if stacktrace != "" {
 		p.writeErrorDetails(&buffer, "", stacktrace)
@@ -275,12 +277,12 @@ func tsFieldToTimestamp(input interface{}) (*time.Time, error) {
 	return &zeroTime, fmt.Errorf("don't know how to turn %T (value %s) into a time.Time object", input, input)
 }
 
-func (p *Processor) prettifyZapdriveLine(line string, lineData map[string]interface{}) (string, error) {
+func (p *Processor) prettifyZapdriveLine(line string, lineAllData map[string][]any) (string, error) {
 	timeField := "time"
-	timeValue := lineData[timeField]
-	if lineData[timeField] == nil {
+	timeValue := getLastValue(lineAllData, timeField)
+	if timeValue == nil {
 		timeField = "timestamp"
-		timeValue = lineData[timeField]
+		timeValue = getLastValue(lineAllData, timeField)
 	}
 
 	var buffer bytes.Buffer
@@ -291,46 +293,44 @@ func (p *Processor) prettifyZapdriveLine(line string, lineData map[string]interf
 	}
 
 	var caller *string
-	if v := lineData["caller"]; v != nil {
+	if v := getLastValue(lineAllData, "caller"); v != nil {
 		callerStr := v.(string)
 		caller = &callerStr
 	}
 
 	var logger *string
-	if v := lineData["logger"]; v != nil {
+	if v := getLastValue(lineAllData, "logger"); v != nil {
 		loggerStr := v.(string)
 		logger = &loggerStr
 	}
 
-	p.writeHeader(&buffer, parsedTime, lineData["severity"].(string), caller, logger, lineData["message"].(string))
+	p.writeHeader(&buffer, parsedTime, getLastValue(lineAllData, "severity").(string), caller, logger, getLastValue(lineAllData, "message").(string))
 
-	// Delete standard stuff from data fields
-	delete(lineData, timeField)
-	delete(lineData, "severity")
-	delete(lineData, "caller")
-	delete(lineData, "logger")
-	delete(lineData, "message")
-
-	if !p.showAllFields {
-		delete(lineData, "labels")
-		delete(lineData, "serviceContext")
-		delete(lineData, "logging.googleapis.com/labels")
-		delete(lineData, "logging.googleapis.com/sourceLocation")
+	// Create filtered data map excluding standard fields
+	filteredData := make(map[string]any)
+	for key := range lineAllData {
+		if key != timeField && key != "severity" && key != "caller" && key != "logger" && key != "message" && key != "errorVerbose" && key != "stacktrace" {
+			if p.showAllFields || (key != "labels" && key != "serviceContext" && key != "logging.googleapis.com/labels" && key != "logging.googleapis.com/sourceLocation") {
+				filteredData[key] = getLastValue(lineAllData, key)
+			}
+		}
 	}
 
 	errorVerbose := ""
-	if t, ok := lineData["errorVerbose"].(string); ok && t != "" {
-		delete(lineData, "errorVerbose")
-		errorVerbose = t
+	if t := getLastValue(lineAllData, "errorVerbose"); t != nil {
+		if errorVerboseStr, ok := t.(string); ok && errorVerboseStr != "" {
+			errorVerbose = errorVerboseStr
+		}
 	}
 
 	stacktrace := ""
-	if t, ok := lineData["stacktrace"].(string); ok && t != "" {
-		delete(lineData, "stacktrace")
-		stacktrace = t
+	if t := getLastValue(lineAllData, "stacktrace"); t != nil {
+		if stacktraceStr, ok := t.(string); ok && stacktraceStr != "" {
+			stacktrace = stacktraceStr
+		}
 	}
 
-	p.writeJSON(&buffer, lineData)
+	p.writeJSON(&buffer, filteredData)
 
 	if errorVerbose != "" || stacktrace != "" {
 		p.writeErrorDetails(&buffer, errorVerbose, stacktrace)
@@ -339,8 +339,8 @@ func (p *Processor) prettifyZapdriveLine(line string, lineData map[string]interf
 	return buffer.String(), nil
 }
 
-func (p *Processor) prettifyLevelMessageTimeLine(line string, lineData map[string]any, lineAllData map[string][]any) (string, error) {
-	logTimestamp, err := tsFieldToTimestamp(lineData["time"])
+func (p *Processor) prettifyLevelMessageTimeLine(line string, lineAllData map[string][]any) (string, error) {
+	logTimestamp, err := tsFieldToTimestamp(getLastValue(lineAllData, "time"))
 	if err != nil {
 		return "", fmt.Errorf("unable to process field 'time': %w", err)
 	}
@@ -362,21 +362,24 @@ func (p *Processor) prettifyLevelMessageTimeLine(line string, lineData map[strin
 		}
 	}
 
-	p.writeHeader(&buffer, logTimestamp, lineData["level"].(string), nil, logger, lineData["message"].(string))
+	p.writeHeader(&buffer, logTimestamp, getLastValue(lineAllData, "level").(string), nil, logger, getLastValue(lineAllData, "message").(string))
 
-	// Delete standard stuff from data fields
-	delete(lineData, "level")
-	delete(lineData, "time")
-	delete(lineData, "message")
-	delete(lineData, "module")
-
-	stacktrace := ""
-	if t, ok := lineData["stacktrace"].(string); ok && t != "" {
-		delete(lineData, "stacktrace")
-		stacktrace = t
+	// Create filtered data map excluding standard fields
+	filteredData := make(map[string]any)
+	for key := range lineAllData {
+		if key != "level" && key != "time" && key != "message" && key != "module" && key != "stacktrace" {
+			filteredData[key] = getLastValue(lineAllData, key)
+		}
 	}
 
-	p.writeJSON(&buffer, lineData)
+	stacktrace := ""
+	if t := getLastValue(lineAllData, "stacktrace"); t != nil {
+		if stacktraceStr, ok := t.(string); ok && stacktraceStr != "" {
+			stacktrace = stacktraceStr
+		}
+	}
+
+	p.writeJSON(&buffer, filteredData)
 
 	if stacktrace != "" {
 		p.writeErrorDetails(&buffer, "", stacktrace)
